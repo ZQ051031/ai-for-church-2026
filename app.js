@@ -219,5 +219,175 @@ function outlineToText(outline) {
 
 if (inNode) {
   module.exports = { parseReference, lookupByReference, searchByKeyword, lookupVerses, generateOutline, outlineToText };
+} else {
+  initializeWorkspace();
+}
+
+function initializeWorkspace() {
+  const get = (id) => document.getElementById(id);
+  const query = get("outline-query");
+  const outline = get("outline");
+  const outlineStatus = get("outline-status");
+  const lookupQuery = get("lookup-query");
+  const lookupResults = get("lookup-results");
+  let current = null;
+  let edits = new Map();
+
+  function add(parent, tag, content, className) {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    element.textContent = content;
+    parent.append(element);
+    return element;
+  }
+
+  function editable(parent, tag, label, key, value, singleLine = false) {
+    const field = add(parent, tag, value, "editable");
+    field.setAttribute("contenteditable", "plaintext-only");
+    field.setAttribute("role", "textbox");
+    field.setAttribute("aria-label", label);
+    field.setAttribute("aria-multiline", String(!singleLine));
+    if (singleLine) {
+      field.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.isComposing) event.preventDefault();
+      });
+    }
+    edits.set(key, field);
+  }
+
+  function labeledField(parent, label, key, value) {
+    add(parent, "p", label, "field-label");
+    editable(parent, "div", label, key, value);
+  }
+
+  function render(input) {
+    current = generateOutline(input);
+    edits = new Map();
+    outline.replaceChildren();
+    add(outline, "p", current.label, "draft-label");
+    add(outline, "p", current.responsibility, "responsibility");
+    if (current.notice) add(outline, "p", current.notice, "notice");
+    add(outline, "p", "Sermon title", "field-label");
+    editable(outline, "div", "Sermon title", "title", current.title, true);
+    labeledField(outline, "Scripture focus", "scripture", current.scripture);
+    labeledField(outline, "Introduction", "introduction", current.introduction);
+    const list = add(outline, "ol", "", "points");
+    list.setAttribute("aria-label", "Main points");
+    current.points.forEach((point, index) => {
+      const item = add(list, "li", "", "point");
+      add(item, "p", `Main point 0${index + 1}`, "eyebrow");
+      editable(item, "div", `Main point ${index + 1} heading`, `${index}-heading`, point.heading, true);
+      for (const [key, label] of [
+        ["citations", "Scripture citations (KJV)"], ["explanation", "Explanation"],
+        ["illustration", "Illustration"], ["questions", "Application Questions"]
+      ]) {
+        add(item, "p", label, "field-label");
+        editable(item, "div", `Main point ${index + 1}: ${label}`, `${index}-${key}`, point[key]);
+      }
+    });
+    labeledField(outline, "Closing / Call to Response", "closing", current.closing);
+    labeledField(outline, "Closing Prayer", "prayer", current.prayer);
+    outline.hidden = false;
+    get("outline-empty").hidden = true;
+    get("outline-actions").hidden = false;
+    get("review-title").focus();
+    outlineStatus.textContent = "Draft ready. Select any outlined field to edit it.";
+    outline.addEventListener("input", resetOutlineStatus, { once: true });
+  }
+
+  function resetOutlineStatus() {
+    outlineStatus.textContent = "";
+  }
+
+  function readEdits() {
+    const value = (key) => edits.get(key).innerText.trim();
+    const updated = { ...current };
+    for (const key of ["title", "scripture", "introduction", "closing", "prayer"]) updated[key] = value(key);
+    updated.points = current.points.map((point, index) =>
+      Object.fromEntries(Object.keys(point).map((key) => [key, value(`${index}-${key}`)]))
+    );
+    return updated;
+  }
+
+  function readQuery(field) {
+    const input = field.value.trim();
+    if (!input) {
+      field.setCustomValidity("Enter a passage or topic.");
+      field.reportValidity();
+    }
+    return input;
+  }
+
+  for (const field of [query, lookupQuery]) {
+    field.addEventListener("input", () => field.setCustomValidity(""));
+  }
+  get("outline-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const input = readQuery(query);
+    if (input) render(input);
+  });
+  for (const button of document.querySelectorAll("[data-example]")) {
+    button.addEventListener("click", () => {
+      query.value = button.dataset.example;
+      query.setCustomValidity("");
+      render(query.value);
+    });
+  }
+  get("copy-outline").addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    const text = outlineToText(readEdits());
+    try {
+      if (!navigator.clipboard) throw new Error("Clipboard API unavailable");
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const field = add(document.body, "textarea", text, "clipboard-helper");
+      field.setAttribute("readonly", "");
+      field.select();
+      let copied = false;
+      try {
+        copied = document.execCommand("copy");
+      } catch {
+        copied = false;
+      } finally {
+        field.remove();
+        button.focus();
+      }
+      if (!copied) {
+        outlineStatus.textContent = "Clipboard unavailable. Select the draft text and copy it manually.";
+        return;
+      }
+    }
+    outlineStatus.textContent = "Outline copied.";
+    outline.addEventListener("input", resetOutlineStatus, { once: true });
+  });
+  get("print-outline").addEventListener("click", () => window.print());
+  get("clear-outline").addEventListener("click", () => {
+    query.value = "";
+    query.setCustomValidity("");
+    current = null;
+    edits.clear();
+    outline.replaceChildren();
+    outline.hidden = true;
+    get("outline-actions").hidden = true;
+    get("outline-empty").hidden = false;
+    outlineStatus.textContent = "Outline cleared.";
+    query.focus();
+  });
+
+  get("lookup-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const input = readQuery(lookupQuery);
+    if (!input) return;
+    const { matches, notice } = lookupVerses(input);
+    lookupResults.replaceChildren();
+    for (const verse of matches) {
+      const item = add(lookupResults, "li", "");
+      add(item, "p", `${verse.reference} · KJV`, "verse-reference");
+      add(item, "blockquote", verse.text);
+    }
+    lookupResults.hidden = !matches.length;
+    const count = matches.length ? `${matches.length} ${matches.length === 1 ? "verse" : "verses"} found.` : "";
+    get("lookup-status").textContent = [count, notice].filter(Boolean).join(" ");
+  });
 }
 })();
